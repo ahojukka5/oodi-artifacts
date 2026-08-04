@@ -1,0 +1,164 @@
+name: Build OpenCascade wrapper artifact
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - agent/rebuild-opencascade-artifact
+
+concurrency:
+  group: opencascade-wrapper-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    name: Build and publish OCCT wrapper
+    runs-on: self-hosted
+    timeout-minutes: 120
+    env:
+      JULIA_DEPOT_PATH: ${{ runner.temp }}/oodi-opencascade-depot
+      MONGE_COMMIT: 99b19248b81c1662ee046f54f2a5a6f7ca59977c
+      OPENCASCADE_CXXWRAP_COMMIT: fc988de3315b21cd900a86548989d2d31293619e
+
+    steps:
+      - name: Check out artifact repository
+        uses: actions/checkout@v4
+
+      - name: Check out pinned Monge source
+        uses: actions/checkout@v4
+        with:
+          repository: ahojukka5/Monge.jl
+          ref: ${{ env.MONGE_COMMIT }}
+          path: sources/Monge.jl
+
+      - name: Check out pinned wrapper source
+        uses: actions/checkout@v4
+        with:
+          repository: ahojukka5/OpenCascadeCxxWrap
+          ref: ${{ env.OPENCASCADE_CXXWRAP_COMMIT }}
+          path: sources/OpenCascadeCxxWrap
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.11"
+
+      - name: Prepare clean build depot
+        shell: bash
+        run: |
+          rm -rf "$JULIA_DEPOT_PATH"
+          mkdir -p "$JULIA_DEPOT_PATH"
+          test ! -f "$JULIA_DEPOT_PATH/artifacts/Overrides.toml"
+          command -v cmake
+          command -v readelf
+          command -v gh
+
+      - name: Instantiate pinned build environment
+        shell: bash
+        env:
+          JULIA_PKG_PRECOMPILE_AUTO: "0"
+        run: >-
+          julia --startup-file=no --project=sources/Monge.jl
+          -e 'using Pkg; Pkg.instantiate(verbose=true)'
+
+      - name: Build Julia artifact
+        shell: bash
+        env:
+          MONGE_OPENCASCADE_CXXWRAP_SOURCE: ${{ github.workspace }}/sources/OpenCascadeCxxWrap
+        run: >-
+          julia --startup-file=no --project=sources/Monge.jl
+          sources/Monge.jl/gen/build_local.jl
+
+      - name: Verify loader contract
+        id: artifact
+        shell: bash
+        run: |
+          built_hash="$({
+            julia --startup-file=no -e '
+              using TOML
+              path = joinpath(first(DEPOT_PATH), "artifacts", "Overrides.toml")
+              overrides = TOML.parsefile(path)
+              length(overrides) == 1 || error("expected exactly one artifact override")
+              print(only(values(overrides)))
+            '
+          })"
+          artifact_dir="$JULIA_DEPOT_PATH/artifacts/$built_hash"
+          library="$artifact_dir/lib/libopencascade_cxxwrap.so"
+          test -f "$library"
+          readelf -d "$library" | tee wrapper-dynamic-section.txt
+          if grep -q 'libTKDECascade' wrapper-dynamic-section.txt; then
+            echo "wrapper still depends on unavailable libTKDECascade" >&2
+            exit 1
+          fi
+          julia --startup-file=no --project=sources/Monge.jl -e '
+            using Monge
+            @assert volume(box(1, 1, 1)) ≈ 1
+          '
+          echo "hash=$built_hash" >> "$GITHUB_OUTPUT"
+          echo "directory=$artifact_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Archive artifact
+        id: archive
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/libopencascade_cxxwrap.tar.gz"
+          tar -C "${{ steps.artifact.outputs.directory }}" -czf "$archive" .
+          sha256="$(sha256sum "$archive" | awk '{print $1}')"
+          tag="libopencascade_cxxwrap-${{ steps.artifact.outputs.hash }}"
+          tag="${tag:0:35}"
+          cat > release-metadata.txt <<EOF
+          artifact=libopencascade_cxxwrap
+          tree_hash=${{ steps.artifact.outputs.hash }}
+          archive_sha256=$sha256
+          release_tag=$tag
+          monge_commit=$MONGE_COMMIT
+          opencascade_cxxwrap_commit=$OPENCASCADE_CXXWRAP_COMMIT
+          julia_version=$(julia --version)
+          EOF
+          cat release-metadata.txt
+          echo "path=$archive" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.archive.outputs.tag }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release already exists: $tag" >&2
+            exit 1
+          fi
+          cat > release-notes.md <<EOF
+          Reproducible Julia artifact for Monge.jl's OCCT CxxWrap backend.
+
+          - artifact tree: `${{ steps.artifact.outputs.hash }}`
+          - archive SHA-256: `${{ steps.archive.outputs.sha256 }}`
+          - Monge commit: `$MONGE_COMMIT`
+          - OpenCascadeCxxWrap commit: `$OPENCASCADE_CXXWRAP_COMMIT`
+          - build workflow commit: `$GITHUB_SHA`
+
+          The workflow verifies the shared object has no dependency on
+          `libTKDECascade` and loads Monge in a fresh Julia process before
+          publishing this release.
+          EOF
+          gh release create "$tag" \
+            "${{ steps.archive.outputs.path }}#libopencascade_cxxwrap.tar.gz" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$tag" \
+            --notes-file release-notes.md
+
+      - name: Upload build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencascade-wrapper-build-evidence
+          path: |
+            release-metadata.txt
+            wrapper-dynamic-section.txt
+          if-no-files-found: warn
+          retention-days: 30
