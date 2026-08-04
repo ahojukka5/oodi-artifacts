@@ -5,6 +5,9 @@ on:
   push:
     branches:
       - agent/rebuild-opencascade-artifact
+  pull_request:
+    branches:
+      - main
 
 concurrency:
   group: opencascade-wrapper-${{ github.ref }}
@@ -14,8 +17,21 @@ permissions:
   contents: write
 
 jobs:
+  guard-self-hosted:
+    name: Verify trusted source for self-hosted jobs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject pull requests from forks
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error::Self-hosted jobs do not run for fork pull requests."
+          exit 1
+
   build-and-publish:
-    name: Build and publish OCCT wrapper
+    name: Build and verify OCCT wrapper
+    needs: guard-self-hosted
     runs-on: self-hosted
     timeout-minutes: 120
     env:
@@ -107,11 +123,11 @@ jobs:
           archive="$RUNNER_TEMP/libopencascade_cxxwrap.tar.gz"
           tar -C "${{ steps.artifact.outputs.directory }}" -czf "$archive" .
           sha256="$(sha256sum "$archive" | awk '{print $1}')"
-          tag="libopencascade_cxxwrap-${{ steps.artifact.outputs.hash }}"
-          tag="${tag:0:35}"
+          built_hash="${{ steps.artifact.outputs.hash }}"
+          tag="libopencascade_cxxwrap-${built_hash:0:8}"
           cat > release-metadata.txt <<EOF
           artifact=libopencascade_cxxwrap
-          tree_hash=${{ steps.artifact.outputs.hash }}
+          tree_hash=$built_hash
           archive_sha256=$sha256
           release_tag=$tag
           monge_commit=$MONGE_COMMIT
@@ -124,14 +140,15 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Publish immutable release
+        if: github.event_name != 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ steps.archive.outputs.tag }}"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release already exists: $tag" >&2
-            exit 1
+            echo "content-addressed release already exists: $tag"
+            exit 0
           fi
           cat > release-notes.md <<EOF
           Reproducible Julia artifact for Monge.jl's OCCT CxxWrap backend.
