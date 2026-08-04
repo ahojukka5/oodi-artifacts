@@ -1,0 +1,283 @@
+name: Publish synchronized OCCT wrapper
+
+on:
+  push:
+    branches:
+      - main
+      - agent/publish-synchronized-occt-wrapper
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: publish-occt-wrapper-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard-self-hosted:
+    name: Verify trusted source for self-hosted jobs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject pull requests from forks
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error::Self-hosted jobs do not run for fork pull requests."
+          exit 1
+
+  build-qualify-publish:
+    name: Build, qualify, and publish
+    needs: guard-self-hosted
+    runs-on: self-hosted
+    timeout-minutes: 180
+    env:
+      JULIA_DEPOT_PATH: ${{ runner.temp }}/oodi-occt-wrapper-depot
+      MONGE_COMMIT: eec0e0ee944785e49ff9b42b43d8c362c03c4f92
+      OPENCASCADE_CXXWRAP_COMMIT: fc988de3315b21cd900a86548989d2d31293619e
+
+    steps:
+      - name: Checkout artifact host
+        uses: actions/checkout@v4
+        with:
+          path: artifact-host
+
+      - name: Checkout qualified Monge packaging source
+        uses: actions/checkout@v4
+        with:
+          repository: ahojukka5/Monge.jl
+          ref: ${{ env.MONGE_COMMIT }}
+          path: Monge.jl
+
+      - name: Checkout pinned OpenCascadeCxxWrap source
+        uses: actions/checkout@v4
+        with:
+          repository: ahojukka5/OpenCascadeCxxWrap
+          ref: ${{ env.OPENCASCADE_CXXWRAP_COMMIT }}
+          path: native/OpenCascadeCxxWrap
+
+      - name: Set up Julia 1.12
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12'
+
+      - name: Prepare isolated build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$JULIA_DEPOT_PATH"
+          mkdir -p "$JULIA_DEPOT_PATH"
+          command -v cmake
+          command -v git
+          command -v readelf
+          command -v sha256sum
+          command -v tar
+          command -v gh
+          df -h . "$RUNNER_TEMP" || true
+
+      - name: Instantiate without loading Monge
+        working-directory: Monge.jl
+        shell: bash
+        env:
+          JULIA_PKG_PRECOMPILE_AUTO: '0'
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=. -e '
+            using Pkg
+            Pkg.instantiate(verbose=true)
+          '
+
+      - name: Build pinned native wrapper
+        working-directory: Monge.jl
+        shell: bash
+        env:
+          MONGE_OPENCASCADE_CXXWRAP_SOURCE: ${{ github.workspace }}/native/OpenCascadeCxxWrap
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=. gen/build_local.jl
+
+      - name: Resolve built artifact metadata
+        id: artifact
+        working-directory: Monge.jl
+        shell: bash
+        run: |
+          set -euo pipefail
+          built_hash="$(julia --startup-file=no -e '
+            using TOML
+            path = joinpath(first(DEPOT_PATH), "artifacts", "Overrides.toml")
+            overrides = TOML.parsefile(path)
+            length(overrides) == 1 || error("expected exactly one artifact override")
+            print(only(values(overrides)))
+          ')"
+          artifact_dir="$JULIA_DEPOT_PATH/artifacts/$built_hash"
+          library="$artifact_dir/lib/libopencascade_cxxwrap.so"
+          test -f "$library"
+          readelf -d "$library" | tee wrapper-dynamic-section.txt
+          if grep -q 'libTKDECascade' wrapper-dynamic-section.txt; then
+            echo "wrapper still depends on unavailable libTKDECascade" >&2
+            exit 1
+          fi
+          echo "hash=$built_hash" >> "$GITHUB_OUTPUT"
+          echo "directory=$artifact_dir" >> "$GITHUB_OUTPUT"
+          echo "library=$library" >> "$GITHUB_OUTPUT"
+
+      - name: Verify synchronized native capability
+        working-directory: Monge.jl
+        shell: bash
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=. -e '
+            using Monge
+            required = (
+              :BRep_Tool_FirstParameterOnSurface,
+              :HelixBRep_BuilderHelix,
+              :GeomCurveArray,
+              :GeomFill_Gordon,
+              :GeomFill_Gordon_Init,
+            )
+            missing = filter(name -> !isdefined(Monge.OCC, name), required)
+            isempty(missing) || error("missing synchronized bindings: $missing")
+            @assert volume(box(1, 1, 1)) ≈ 1
+          '
+
+      - name: Run complete Monge qualification suite
+        working-directory: Monge.jl
+        shell: bash
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=. test/runtests.jl \
+            2>&1 | tee artifact-qualification.log
+
+      - name: Generate hydraulic manifold evidence
+        working-directory: Monge.jl
+        shell: bash
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=. -e '
+            using Monge
+            import Monge: intersect, union
+            include("examples/hydraulic_manifold_block/hydraulic_manifold_block.jl")
+            include("examples/hydraulic_manifold_block/isolation_checks.jl")
+            generate_manifold_artifacts()
+          '
+          julia --startup-file=no --project=. -e '
+            using Monge
+            path = "examples/hydraulic_manifold_block/artifacts/hydraulic_manifold_hero.png"
+            fraction = png_ink_fraction(path)
+            println("hero ink fraction = ", fraction)
+            fraction > 0.08 || error("hydraulic manifold hero render is blank or too sparse")
+          '
+
+      - name: Create deterministic archive
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/libopencascade_cxxwrap.tar.gz"
+          tar \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -C "${{ steps.artifact.outputs.directory }}" \
+            -czf "$archive" .
+          archive_sha="$(sha256sum "$archive" | awk '{print $1}')"
+          tree_hash="${{ steps.artifact.outputs.hash }}"
+          tag="libopencascade_cxxwrap-${tree_hash:0:8}"
+          cat > release-metadata.txt <<EOF
+          artifact=libopencascade_cxxwrap
+          tree_hash=$tree_hash
+          archive_sha256=$archive_sha
+          release_tag=$tag
+          monge_commit=$MONGE_COMMIT
+          opencascade_cxxwrap_commit=$OPENCASCADE_CXXWRAP_COMMIT
+          julia_version=$(julia --version)
+          platform=$(uname -m)-$(uname -s | tr '[:upper:]' '[:lower:]')
+          EOF
+          cat release-metadata.txt
+          echo "path=$archive" >> "$GITHUB_OUTPUT"
+          echo "sha256=$archive_sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable release
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.archive.outputs.tag }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            download_dir="$(mktemp -d)"
+            gh release download "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern libopencascade_cxxwrap.tar.gz \
+              --dir "$download_dir"
+            existing_sha="$(sha256sum \
+              "$download_dir/libopencascade_cxxwrap.tar.gz" | awk '{print $1}')"
+            test "$existing_sha" = "${{ steps.archive.outputs.sha256 }}"
+            echo "verified existing immutable release $tag"
+            exit 0
+          fi
+          gh release create "$tag" \
+            "${{ steps.archive.outputs.path }}#libopencascade_cxxwrap.tar.gz" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$tag" \
+            --notes "Synchronized Monge OCCT wrapper. Tree ${{ steps.artifact.outputs.hash }}; OpenCascadeCxxWrap $OPENCASCADE_CXXWRAP_COMMIT; Monge $MONGE_COMMIT; Julia 1.12."
+
+      - name: Record publication evidence
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.archive.outputs.tag }}"
+          title="Published $tag"
+          existing="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state all \
+            --search "$tag in:title" \
+            --json number \
+            --jq 'length')"
+          if [ "$existing" != "0" ]; then
+            echo "publication evidence already exists for $tag"
+            exit 0
+          fi
+          cat > release-evidence.md <<EOF
+          Synchronized OCCT wrapper publication completed successfully.
+
+          - tree hash: ${{ steps.artifact.outputs.hash }}
+          - archive SHA-256: ${{ steps.archive.outputs.sha256 }}
+          - release tag: $tag
+          - Monge qualification commit: $MONGE_COMMIT
+          - OpenCascadeCxxWrap commit: $OPENCASCADE_CXXWRAP_COMMIT
+          - Julia: 1.12
+          - required bindings: p-curve, helix, and Gordon present
+          - complete Monge qualification suite: passed
+          - hydraulic manifold generation and ink check: passed
+          - workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$title" \
+            --body-file release-evidence.md
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synchronized-occt-wrapper-evidence
+          path: |
+            release-metadata.txt
+            Monge.jl/wrapper-dynamic-section.txt
+            Monge.jl/artifact-qualification.log
+            Monge.jl/examples/hydraulic_manifold_block/artifacts/
+          if-no-files-found: warn
+          retention-days: 30
