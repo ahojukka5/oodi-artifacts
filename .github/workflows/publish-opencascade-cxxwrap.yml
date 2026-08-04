@@ -1,0 +1,303 @@
+name: Publish OpenCascadeCxxWrap artifact
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/publish-opencascade-cxxwrap.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-opencascade-cxxwrap.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: opencascade-cxxwrap-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ARTIFACT_NAME: libopencascade_cxxwrap
+  ARCHIVE_NAME: libopencascade_cxxwrap.tar.gz
+  PROVENANCE_NAME: libopencascade_cxxwrap.provenance.toml
+  WRAPPER_REPOSITORY: ahojukka5/OpenCascadeCxxWrap
+  WRAPPER_REF: fc988de3315b21cd900a86548989d2d31293619e
+  MONGE_REPOSITORY: ahojukka5/Monge.jl
+  MONGE_REF: 35705d2bfd73679b4afe3acb0a2b3a88ea0d4106
+  SOURCE_DATE_EPOCH: '0'
+
+jobs:
+  build-qualify-publish:
+    name: Build and qualify Linux x86_64 artifact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout artifact host
+        uses: actions/checkout@v4
+
+      - name: Checkout pinned Monge qualification source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MONGE_REPOSITORY }}
+          ref: ${{ env.MONGE_REF }}
+          path: Monge.jl
+
+      - name: Checkout pinned wrapper source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.WRAPPER_REPOSITORY }}
+          ref: ${{ env.WRAPPER_REF }}
+          path: native/OpenCascadeCxxWrap
+
+      - name: Set up Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12'
+
+      - name: Record toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          julia --version
+          cmake --version
+          c++ --version
+          tar --version
+
+      - name: Instantiate pinned Monge environment
+        working-directory: Monge.jl
+        env:
+          JULIA_PKG_PRECOMPILE_AUTO: '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          julia --startup-file=no --project=. -e '
+            using Pkg
+            Pkg.instantiate(verbose=true)
+            Pkg.status(; mode=Pkg.PKGMODE_MANIFEST)
+          ' 2>&1 | tee instantiate.log
+
+      - name: Build first pinned wrapper artifact
+        working-directory: Monge.jl
+        env:
+          MONGE_OPENCASCADE_CXXWRAP_SOURCE: ${{ github.workspace }}/native/OpenCascadeCxxWrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          julia --startup-file=no --project=. gen/build_local.jl \
+            2>&1 | tee native-build-first.log
+
+      - name: Resolve first artifact identity
+        id: first
+        shell: bash
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=Monge.jl -e '
+            using Pkg.Artifacts
+            using TOML
+
+            declared = artifact_hash(
+                ENV["ARTIFACT_NAME"],
+                abspath("Monge.jl/Artifacts.toml"),
+            )
+            declared === nothing && error("missing declared artifact")
+            overrides = TOML.parsefile(
+                joinpath(first(DEPOT_PATH), "artifacts", "Overrides.toml"),
+            )
+            built = get(overrides, string(declared), nothing)
+            built isa String || error("build did not record an artifact override")
+            path = joinpath(first(DEPOT_PATH), "artifacts", built)
+            isfile(joinpath(path, "lib", "libopencascade_cxxwrap.so")) ||
+                error("built shared library is missing")
+
+            open(ENV["GITHUB_OUTPUT"], "a") do io
+                println(io, "declared_hash=", declared)
+                println(io, "tree_hash=", built)
+                println(io, "artifact_path=", path)
+            end
+          '
+
+      - name: Build second pinned wrapper artifact
+        working-directory: Monge.jl
+        env:
+          MONGE_OPENCASCADE_CXXWRAP_SOURCE: ${{ github.workspace }}/native/OpenCascadeCxxWrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          julia --startup-file=no --project=. gen/build_local.jl \
+            2>&1 | tee native-build-second.log
+
+      - name: Resolve second artifact identity
+        id: second
+        shell: bash
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project=Monge.jl -e '
+            using Pkg.Artifacts
+            using TOML
+
+            declared = artifact_hash(
+                ENV["ARTIFACT_NAME"],
+                abspath("Monge.jl/Artifacts.toml"),
+            )
+            declared === nothing && error("missing declared artifact")
+            overrides = TOML.parsefile(
+                joinpath(first(DEPOT_PATH), "artifacts", "Overrides.toml"),
+            )
+            built = get(overrides, string(declared), nothing)
+            built isa String || error("build did not record an artifact override")
+            path = joinpath(first(DEPOT_PATH), "artifacts", built)
+            isfile(joinpath(path, "lib", "libopencascade_cxxwrap.so")) ||
+                error("built shared library is missing")
+
+            open(ENV["GITHUB_OUTPUT"], "a") do io
+                println(io, "tree_hash=", built)
+                println(io, "artifact_path=", path)
+                println(io, "release_tag=libopencascade_cxxwrap-", first(built, 8))
+            end
+          '
+
+      - name: Require reproducible artifact identity
+        env:
+          FIRST_TREE_HASH: ${{ steps.first.outputs.tree_hash }}
+          SECOND_TREE_HASH: ${{ steps.second.outputs.tree_hash }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$FIRST_TREE_HASH" = "$SECOND_TREE_HASH" || {
+            echo "::error::Pinned wrapper builds produced different Julia artifact trees."
+            echo "first=$FIRST_TREE_HASH"
+            echo "second=$SECOND_TREE_HASH"
+            exit 1
+          }
+          echo "Reproduced Julia artifact tree $SECOND_TREE_HASH"
+
+      - name: Qualify Gordon raw and public bindings
+        working-directory: Monge.jl
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          julia --startup-file=no --project=. -e '
+            module RawGordonQualification
+            import Monge
+            using Monge.OCC
+            using Test
+            include("test/occ_geomfill2.jl")
+            end
+
+            module PublicGordonQualification
+            using Monge
+            using Test
+            include("test/gordon_surface.jl")
+            end
+          ' 2>&1 | tee gordon-qualification.log
+
+      - name: Create deterministic archive and provenance
+        id: package
+        env:
+          ARTIFACT_PATH: ${{ steps.second.outputs.artifact_path }}
+          TREE_HASH: ${{ steps.second.outputs.tree_hash }}
+          RELEASE_TAG: ${{ steps.second.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          tar \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -cf - \
+            -C "$ARTIFACT_PATH" . \
+            | gzip -n -9 > "dist/$ARCHIVE_NAME"
+
+          archive_sha256="$(sha256sum "dist/$ARCHIVE_NAME" | awk '{print $1}')"
+          printf 'archive_sha256=%s\n' "$archive_sha256" >> "$GITHUB_OUTPUT"
+
+          cat > "dist/$PROVENANCE_NAME" <<EOF
+          artifact = "$ARTIFACT_NAME"
+          platform = "x86_64-linux-gnu"
+          tree_hash = "$TREE_HASH"
+          archive = "$ARCHIVE_NAME"
+          archive_sha256 = "$archive_sha256"
+          source_repository = "$WRAPPER_REPOSITORY"
+          source_commit = "$WRAPPER_REF"
+          qualification_repository = "$MONGE_REPOSITORY"
+          qualification_commit = "$MONGE_REF"
+          julia_version = "1.12"
+          release_tag = "$RELEASE_TAG"
+          EOF
+
+          cat > dist/release-notes.md <<EOF
+          Immutable Linux x86_64/glibc build of libopencascade_cxxwrap.
+
+          - wrapper source: $WRAPPER_REPOSITORY@$WRAPPER_REF
+          - qualification source: $MONGE_REPOSITORY@$MONGE_REF
+          - Julia artifact tree: $TREE_HASH
+          - archive SHA-256: $archive_sha256
+          - Julia: 1.12
+          - qualification: reproducible double build, strict raw Gordon fixture,
+            and public gordon_surface area-6 rectangle fixture
+          EOF
+
+          sha256sum "dist/$ARCHIVE_NAME"
+          cat "dist/$PROVENANCE_NAME"
+
+      - name: Upload qualified candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: libopencascade-cxxwrap-${{ steps.second.outputs.tree_hash }}
+          path: |
+            dist/${{ env.ARCHIVE_NAME }}
+            dist/${{ env.PROVENANCE_NAME }}
+            dist/release-notes.md
+            Monge.jl/instantiate.log
+            Monge.jl/native-build-first.log
+            Monge.jl/native-build-second.log
+            Monge.jl/gordon-qualification.log
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish immutable release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.second.outputs.release_tag }}
+          ARCHIVE_SHA256: ${{ steps.package.outputs.archive_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            mkdir -p existing-release
+            gh release download "$RELEASE_TAG" \
+              --pattern "$ARCHIVE_NAME" \
+              --pattern "$PROVENANCE_NAME" \
+              --dir existing-release
+
+            existing_sha256="$(sha256sum "existing-release/$ARCHIVE_NAME" | awk '{print $1}')"
+            test "$existing_sha256" = "$ARCHIVE_SHA256" || {
+              echo "::error::Existing release $RELEASE_TAG has different archive bytes."
+              exit 1
+            }
+            cmp "existing-release/$PROVENANCE_NAME" "dist/$PROVENANCE_NAME"
+            echo "Release $RELEASE_TAG already contains the identical artifact."
+          else
+            gh release create "$RELEASE_TAG" \
+              "dist/$ARCHIVE_NAME" \
+              "dist/$PROVENANCE_NAME" \
+              --title "$RELEASE_TAG" \
+              --notes-file dist/release-notes.md
+          fi
+
+          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          printf 'Published release: %s\n' "$release_url" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Tree hash: `%s`\n' "${{ steps.second.outputs.tree_hash }}" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Archive SHA-256: `%s`\n' "$ARCHIVE_SHA256" >> "$GITHUB_STEP_SUMMARY"
