@@ -1,9 +1,9 @@
 name: Publish OpenCascadeCxxWrap artifact
 
+# Artifact qualification/publication is release infrastructure, not an ordinary
+# pull-request correctness gate. It runs only after changes land on main or when
+# explicitly dispatched, and uses the same self-hosted fleet as the portfolio.
 on:
-  pull_request:
-    paths:
-      - .github/workflows/publish-opencascade-cxxwrap.yml
   push:
     branches: [main]
     paths:
@@ -30,7 +30,7 @@ env:
 jobs:
   build-qualify-publish:
     name: Build and qualify Linux x86_64 artifact
-    runs-on: ubuntu-24.04
+    runs-on: self-hosted
     timeout-minutes: 180
 
     steps:
@@ -266,7 +266,6 @@ jobs:
           retention-days: 30
 
       - name: Publish immutable release
-        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.second.outputs.release_tag }}
