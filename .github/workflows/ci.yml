@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: "lint: workflow policy"
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: self-hosted
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require self-hosted-only workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -R -nE 'runs-on:[[:space:]]*(ubuntu|macos|windows)-' .github/workflows; then
+            echo '::error::GitHub-hosted runner label found.'
+            exit 1
+          fi
+          grep -R -q 'runs-on: self-hosted' .github/workflows
+      - name: Validate publication contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow=.github/workflows/publish-opencascade-cxxwrap.yml
+          grep -Fq 'runs-on: self-hosted' "$workflow"
+          grep -Fq 'timeout-minutes: 180' "$workflow"
+          grep -Fq 'WRAPPER_REF: fc988de3315b21cd900a86548989d2d31293619e' "$workflow"
+          grep -Fq 'SOURCE_DATE_EPOCH:' "$workflow"
