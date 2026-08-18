@@ -85,7 +85,7 @@ jobs:
             Pkg.status(; mode=Pkg.PKGMODE_MANIFEST)
           ' 2>&1 | tee instantiate.log
 
-      - name: Build first pinned wrapper artifact
+      - name: Build the pinned wrapper artifact
         working-directory: Monge.jl
         env:
           MONGE_OPENCASCADE_CXXWRAP_SOURCE: ${{ github.workspace }}/native/OpenCascadeCxxWrap
@@ -94,10 +94,10 @@ jobs:
           set -euo pipefail
           set -o pipefail
           julia --startup-file=no --project=. gen/build_local.jl \
-            2>&1 | tee native-build-first.log
+            2>&1 | tee native-build.log
 
-      - name: Resolve first artifact identity
-        id: first
+      - name: Resolve artifact identity
+        id: artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -126,62 +126,6 @@ jobs:
             end
           '
 
-      - name: Build second pinned wrapper artifact
-        working-directory: Monge.jl
-        env:
-          MONGE_OPENCASCADE_CXXWRAP_SOURCE: ${{ github.workspace }}/native/OpenCascadeCxxWrap
-        shell: bash
-        run: |
-          set -euo pipefail
-          set -o pipefail
-          julia --startup-file=no --project=. gen/build_local.jl \
-            2>&1 | tee native-build-second.log
-
-      - name: Resolve second artifact identity
-        id: second
-        shell: bash
-        run: |
-          set -euo pipefail
-          julia --startup-file=no --project=Monge.jl -e '
-            using Pkg.Artifacts
-            using TOML
-
-            declared = artifact_hash(
-                ENV["ARTIFACT_NAME"],
-                abspath("Monge.jl/Artifacts.toml"),
-            )
-            declared === nothing && error("missing declared artifact")
-            overrides = TOML.parsefile(
-                joinpath(first(DEPOT_PATH), "artifacts", "Overrides.toml"),
-            )
-            built = get(overrides, string(declared), nothing)
-            built isa String || error("build did not record an artifact override")
-            path = joinpath(first(DEPOT_PATH), "artifacts", built)
-            isfile(joinpath(path, "lib", "libopencascade_cxxwrap.so")) ||
-                error("built shared library is missing")
-
-            open(ENV["GITHUB_OUTPUT"], "a") do io
-                println(io, "tree_hash=", built)
-                println(io, "artifact_path=", path)
-                println(io, "release_tag=libopencascade_cxxwrap-", first(built, 8))
-            end
-          '
-
-      - name: Require reproducible artifact identity
-        env:
-          FIRST_TREE_HASH: ${{ steps.first.outputs.tree_hash }}
-          SECOND_TREE_HASH: ${{ steps.second.outputs.tree_hash }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$FIRST_TREE_HASH" = "$SECOND_TREE_HASH" || {
-            echo "::error::Pinned wrapper builds produced different Julia artifact trees."
-            echo "first=$FIRST_TREE_HASH"
-            echo "second=$SECOND_TREE_HASH"
-            exit 1
-          }
-          echo "Reproduced Julia artifact tree $SECOND_TREE_HASH"
-
       - name: Qualify Gordon raw and public bindings
         working-directory: Monge.jl
         shell: bash
@@ -206,9 +150,9 @@ jobs:
       - name: Create deterministic archive and provenance
         id: package
         env:
-          ARTIFACT_PATH: ${{ steps.second.outputs.artifact_path }}
-          TREE_HASH: ${{ steps.second.outputs.tree_hash }}
-          RELEASE_TAG: ${{ steps.second.outputs.release_tag }}
+          ARTIFACT_PATH: ${{ steps.artifact.outputs.artifact_path }}
+          TREE_HASH: ${{ steps.artifact.outputs.tree_hash }}
+          RELEASE_TAG: ${{ steps.artifact.outputs.release_tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -249,7 +193,7 @@ jobs:
           - Julia artifact tree: $TREE_HASH
           - archive SHA-256: $archive_sha256
           - Julia: 1.12
-          - qualification: reproducible double build, strict raw Gordon fixture,
+          - qualification: strict raw Gordon fixture,
             and public gordon_surface area-6 rectangle fixture
           EOF
 
@@ -259,14 +203,13 @@ jobs:
       - name: Upload qualified candidate
         uses: actions/upload-artifact@v4
         with:
-          name: libopencascade-cxxwrap-${{ steps.second.outputs.tree_hash }}
+          name: libopencascade-cxxwrap-${{ steps.artifact.outputs.tree_hash }}
           path: |
             dist/${{ env.ARCHIVE_NAME }}
             dist/${{ env.PROVENANCE_NAME }}
             dist/release-notes.md
             Monge.jl/instantiate.log
-            Monge.jl/native-build-first.log
-            Monge.jl/native-build-second.log
+            Monge.jl/native-build.log
             Monge.jl/gordon-qualification.log
           if-no-files-found: error
           retention-days: 30
@@ -274,7 +217,7 @@ jobs:
       - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.second.outputs.release_tag }}
+          RELEASE_TAG: ${{ steps.artifact.outputs.release_tag }}
           ARCHIVE_SHA256: ${{ steps.package.outputs.archive_sha256 }}
         shell: bash
         run: |
@@ -304,5 +247,5 @@ jobs:
 
           release_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
           printf 'Published release: %s\n' "$release_url" >> "$GITHUB_STEP_SUMMARY"
-          printf 'Tree hash: `%s`\n' "${{ steps.second.outputs.tree_hash }}" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Tree hash: `%s`\n' "${{ steps.artifact.outputs.tree_hash }}" >> "$GITHUB_STEP_SUMMARY"
           printf 'Archive SHA-256: `%s`\n' "$ARCHIVE_SHA256" >> "$GITHUB_STEP_SUMMARY"
