@@ -37,12 +37,18 @@ jobs:
       - name: Checkout artifact host
         uses: actions/checkout@v4
 
+      # Monge.jl is private, so the default GITHUB_TOKEN (scoped to this
+      # repository) cannot see it and git reports "Repository not found".
+      # MONGE_READ_TOKEN is a fine-grained PAT with Contents: Read on
+      # ahojukka5/Monge.jl only. The wrapper checkout below needs no token --
+      # OpenCascadeCxxWrap is public.
       - name: Checkout pinned Monge qualification source
         uses: actions/checkout@v4
         with:
           repository: ${{ env.MONGE_REPOSITORY }}
           ref: ${{ env.MONGE_REF }}
           path: Monge.jl
+          token: ${{ secrets.MONGE_READ_TOKEN }}
 
       - name: Checkout pinned wrapper source
         uses: actions/checkout@v4
