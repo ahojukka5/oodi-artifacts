@@ -14,16 +14,21 @@ Yggdrasil). Each artifact is attached as a release asset; the consuming package'
 publication path until the wrapper moves to Yggdrasil. The workflow pins both
 the wrapper source revision and the Monge revision used for qualification.
 
-For pull requests, it builds the Linux x86_64/glibc artifact once and proves the
-strict raw `GeomFill_Gordon` fixture together with the public `gordon_surface`
-rectangle fixture. The deterministic archive, provenance record, and build log
-are uploaded as workflow artifacts without publishing a release.
+The workflow is **manual only** (`workflow_dispatch`). A native OpenCASCADE
+build occupies a self-hosted runner for a long time and republishes an
+immutable, rarely-regenerated binary, so dispatch it when the pinned wrapper
+revision actually changes -- not on every edit to the workflow file.
+
+It builds the Linux x86_64/glibc artifact once and proves the strict raw
+`GeomFill_Gordon` fixture together with the public `gordon_surface` rectangle
+fixture. The deterministic archive, provenance record, and build log are
+uploaded as workflow artifacts.
 
 Reproducibility is not re-checked per run: the immutable-tag rule below already
 catches a build whose bytes differ from what a tag holds.
 
-After the workflow reaches `main`, the same qualification publishes a release
-named from the Julia artifact tree hash. Existing tags are immutable: a rerun
+The same qualification then publishes a release named from the Julia artifact
+tree hash. Existing tags are immutable: a rerun
 succeeds only when both the archive bytes and provenance are identical. Every
 release records the wrapper source commit, qualification commit, platform,
 archive SHA-256, and extracted Julia artifact tree hash.
