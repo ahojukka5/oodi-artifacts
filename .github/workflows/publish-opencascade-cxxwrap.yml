@@ -85,10 +85,17 @@ jobs:
             Pkg.status(; mode=Pkg.PKGMODE_MANIFEST)
           ' 2>&1 | tee instantiate.log
 
+      # gen/build_local.jl defaults to min(Sys.CPU_THREADS, 4) parallel compile
+      # jobs, and Sys.CPU_THREADS reports the *host* core count, not the pod's
+      # quota. On a runner limited to 1 CPU that means four concurrent
+      # OpenCASCADE template instantiations time-slicing one core: four times
+      # the peak memory for no wall-clock gain. Measured peak was 15.1Gi, which
+      # OOM-killed the job even at the 16Gi container maximum.
       - name: Build the pinned wrapper artifact
         working-directory: Monge.jl
         env:
           MONGE_OPENCASCADE_CXXWRAP_SOURCE: ${{ github.workspace }}/native/OpenCascadeCxxWrap
+          MONGE_NATIVE_BUILD_JOBS: "1"
         shell: bash
         run: |
           set -euo pipefail
