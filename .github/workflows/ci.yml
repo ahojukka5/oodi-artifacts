@@ -35,3 +35,8 @@ jobs:
           grep -Fq 'timeout-minutes: 180' "$workflow"
           grep -Fq 'WRAPPER_REF: fc988de3315b21cd900a86548989d2d31293619e' "$workflow"
           grep -Fq 'SOURCE_DATE_EPOCH:' "$workflow"
+          grep -Fq 'workflow_dispatch' "$workflow"
+          if grep -nE '^[[:space:]]+(push|pull_request|schedule|workflow_run):' "$workflow"; then
+            echo '::error::Native publish must be workflow_dispatch only.'
+            exit 1
+          fi
