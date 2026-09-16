@@ -132,6 +132,7 @@ jobs:
                 println(io, "declared_hash=", declared)
                 println(io, "tree_hash=", built)
                 println(io, "artifact_path=", path)
+                println(io, "release_tag=libopencascade_cxxwrap-", first(built, 8))
             end
           '
 
