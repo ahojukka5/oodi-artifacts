@@ -63,3 +63,9 @@ hash.
 
 Monge's `Artifacts.toml` should be updated only after that release succeeds and
 the published asset can be installed from a clean depot.
+
+## License
+
+The files in this repository are MIT. The release assets are not: each
+binary keeps the license of the wrapper or library it was built from, and
+of OpenCASCADE or Netgen when those are linked in. See [LICENSE](LICENSE).
