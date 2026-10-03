@@ -62,7 +62,7 @@ jobs:
       - name: Set up Julia
         uses: julia-actions/setup-julia@v2
         with:
-          version: '1.12'
+          version: '1'
 
       - name: Record toolchain
         shell: bash
@@ -191,7 +191,7 @@ jobs:
           source_commit = "$WRAPPER_REF"
           qualification_repository = "$MONGE_REPOSITORY"
           qualification_commit = "$MONGE_REF"
-          julia_version = "1.12"
+          julia_version = "$(julia --startup-file=no -e 'print(VERSION)')"
           release_tag = "$RELEASE_TAG"
           EOF
 
@@ -202,7 +202,7 @@ jobs:
           - qualification source: $MONGE_REPOSITORY@$MONGE_REF
           - Julia artifact tree: $TREE_HASH
           - archive SHA-256: $archive_sha256
-          - Julia: 1.12
+          - Julia: $(julia --startup-file=no -e 'print(VERSION)')
           - qualification: strict raw Gordon fixture,
             and public gordon_surface area-6 rectangle fixture
           EOF
